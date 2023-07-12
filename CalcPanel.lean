@@ -3,6 +3,7 @@ import Lean.Elab.Tactic.ElabTerm
 import Lean.Meta.ExprLens
 
 import Std.Lean.Position
+import Std.CodeAction
 
 import ProofWidgets.Compat
 import ProofWidgets.Component.Panel
@@ -146,9 +147,35 @@ def calcCommand : CalcParams → RequestM (RequestTask (Option CalcResponse))
                            Will it work with non-ascii insertedCode? -/
                         newCursorPos := {line := replaceRange.start.line,
                                          character := replaceRange.start.character + insertedCode.length } }
+
+section code_action
+open Std CodeAction
+open Lean Server RequestM
+
+@[tactic_code_action calcTactic]
+def createCalc : TacticCodeAction := fun params _snap _ctx _stack node => do
+  let .node (.ofTacticInfo info) _ := node | return #[]
+
+  let eager := {
+    title := s!"Generate a calc block."
+    kind? := "quickfix"
+  }
+  let doc ← readDoc
+  pure #[{
+    eager
+    lazy? := some do
+      let endPos := doc.meta.text.utf8PosToLspPos info.stx.getTailPos?.get!
+      pure { eager with
+        edit? := some <|.ofTextEdit params.textDocument.uri
+          { range := ⟨endPos, endPos⟩, newText := "calcYO" }
+      }
+  }]
+end code_action
+
 namespace Lean.Elab.Term
 open Meta
-
+#check getCalcFirstStep
+#check calcSteps
 def getCalcFirstStep' (step0 : TSyntax ``calcFirstStep) : TermElabM (TSyntax ``calcStep) :=
   withRef step0 do
   match step0  with
@@ -226,6 +253,10 @@ elab_rules : tactic
     return val
   (← getMainGoal).assign val
   replaceMainGoal mvarIds
+
+
+example {a b : Nat} (h1 : a - 3 = 2 * b) : a ^ 2 - a + 3 = 4 * b ^ 2 + 10 * b + 9 := by
+  sorry
 
 
 example (a b c d e : Nat) (h₁ : a = b) (h₂ : b = c) (h₃ : c = d) (h₄ : d = e): a + d = e + d := by
