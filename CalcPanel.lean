@@ -8,6 +8,33 @@ import Std.CodeAction
 import ProofWidgets.Compat
 import ProofWidgets.Component.Panel
 
+section code_action
+open Std CodeAction
+open Lean Server RequestM
+
+@[tactic_code_action calcTactic]
+def createCalc : TacticCodeAction := fun params _snap ctx _stack node => do
+  let .node (.ofTacticInfo info) _ := node | return #[]
+  if info.goalsBefore.isEmpty then return #[]
+  let eager := {
+    title := s!"Generate a calc block."
+    kind? := "quickfix"
+  }
+  let doc ← readDoc
+  return #[{
+    eager
+    lazy? := some do
+      let tacPos := doc.meta.text.utf8PosToLspPos info.stx.getPos?.get!
+      let endPos := doc.meta.text.utf8PosToLspPos info.stx.getTailPos?.get!
+      let goal := info.goalsBefore[0]!
+      let goalFmt ← ctx.runMetaM {} <| goal.withContext do Meta.ppExpr (← goal.getType)
+      return { eager with
+        edit? := some <|.ofTextEdit params.textDocument.uri
+          { range := ⟨tacPos, endPos⟩, newText := s!"calc {goalFmt} := by sorry" }
+      }
+  }]
+end code_action
+
 open ProofWidgets
 open Lean Meta
 
@@ -76,9 +103,8 @@ def Lean.Expr.relStr : Expr → String
 | _ => "Unknow relation"
 
 /-- Return the button text and inserted text above and below.-/
-def mkCalcStr (pos : Array Lean.SubExpr.GoalsLocation) (goalType : Expr) (isFirst : Bool) :
+def suggestSteps (subexprPos : Array SubExpr.Pos) (goalType : Expr) (isFirst : Bool) :
     MetaM (String × String) := do
-  let subexprPos := pos.map (·.loc.target!)
   let goalType := goalType.consumeMData
   let some (rel, lhs, rhs) ← Lean.Elab.Term.getCalcRelation? goalType |
       throwError "invalid 'calc' step, relation expected{indentExpr goalType}"
@@ -133,46 +159,27 @@ def calcCommand : CalcParams → RequestM (RequestTask (Option CalcResponse))
       let some firstLoc := selectedLocations[0]? | return none
       let doc ← RequestM.readDoc
       ctx.runMetaM {} do
-        let md ← firstLoc.mvarId.getDecl
-        let lctx := md.lctx |>.sanitizeNames.run' {options := (← getOptions)}
-        Meta.withLCtx lctx md.localInstances do
-          let (buttonText, insertedCode) ← mkCalcStr selectedLocations md.type isFirst
-          let textDocumentEdit : Lsp.TextDocumentEdit := {
-            textDocument := { uri := doc.meta.uri, version? := doc.meta.version },
-            edits        := #[{range := replaceRange, newText := insertedCode }] }
-          return some { content := buttonText,
-                        edit := Lsp.WorkspaceEdit.ofTextDocumentEdit textDocumentEdit,
-                        /- CHECKME: the new cursor position computation below looks very naive.
-                           Will it work with non-ascii insertedCode? -/
-                        newCursorPos := {line := replaceRange.start.line,
-                                         character := replaceRange.start.character + insertedCode.length } }
-
-section code_action
-open Std CodeAction
-open Lean Server RequestM
-
-@[tactic_code_action calcTactic]
-def createCalc : TacticCodeAction := fun params _snap ctx _stack node => do
-  let .node (.ofTacticInfo info) _ := node | return #[]
-  if info.goalsBefore.isEmpty then return #[]
-  let eager := {
-    title := s!"Generate a calc block."
-    kind? := "quickfix"
-  }
-  let doc ← readDoc
-  return #[{
-    eager
-    lazy? := some do
-      let tacPos := doc.meta.text.utf8PosToLspPos info.stx.getPos?.get!
-      let endPos := doc.meta.text.utf8PosToLspPos info.stx.getTailPos?.get!
-      let goal := info.goalsBefore[0]!
-      let goalFmt ← ctx.runMetaM {} <| goal.withContext do Meta.ppExpr (← goal.getType)
-      return { eager with
-        edit? := some <|.ofTextEdit params.textDocument.uri
-          { range := ⟨tacPos, endPos⟩, newText := s!"calc {goalFmt} := by sorry" }
-      }
-  }]
-end code_action
+      let md ← firstLoc.mvarId.getDecl
+      let lctx := md.lctx |>.sanitizeNames.run' {options := (← getOptions)}
+      Meta.withLCtx lctx md.localInstances do
+      let mut goalSubExprs : Array SubExpr.Pos := #[]
+      for selectedLocation in selectedLocations do
+        if let .target pos := selectedLocation.loc then
+           goalSubExprs := goalSubExprs.push pos
+      -- TODO?: modify my ProofWidgets PR to allow returning several links to action or an warning
+      -- if the selection doesn't make sense. Use it to replace the calcPanel.
+      -- Il faut aussi autoriser à transmettre des données en plus comme le `isFirst` qu'on a ici
+      -- Ne tenter ce refactor qu'après avoir fait fonctionner `rw?` ici.
+      let (buttonText, insertedCode) ← suggestSteps goalSubExprs md.type isFirst
+      let textDocumentEdit : Lsp.TextDocumentEdit := {
+        textDocument := { uri := doc.meta.uri, version? := doc.meta.version },
+        edits        := #[{range := replaceRange, newText := insertedCode }] }
+      return some { content := buttonText,
+                    edit := Lsp.WorkspaceEdit.ofTextDocumentEdit textDocumentEdit,
+                    /- CHECKME: the new cursor position computation below looks very naive.
+                        Will it work with non-ascii insertedCode? -/
+                    newCursorPos := {line := replaceRange.start.line,
+                                      character := replaceRange.start.character + insertedCode.length } }
 
 namespace Lean.Elab.Term
 open Meta
@@ -256,9 +263,16 @@ elab_rules : tactic
   replaceMainGoal mvarIds
 
 
-example {a b : Nat} (h1 : a - 3 = 2 * b) : a ^ 2 - a + 3 = 4 * b ^ 2 + 10 * b + 9 := by
+example {a b c d e f : Int} (h1 : a * d = b * c) (h2 : c * f = d * e) :
+    d * (a * f - b * e) = 0 := by
 sorry
-
+/-
+calc d * (a * f - b * e) = a*d*f - d*b*e := by sorry
+_ = b*c * f - d * b * e := by sorry
+_ = b*(c*f) - d * b * e := by sorry
+_ = b * (d*e) - d * b * e := by sorry
+_ = 0 := by sorry
+-/
 
 example (a b c d e : Nat) (h₁ : a = b) (h₂ : b = c) (h₃ : c = d) (h₄ : d = e): a + d = e + d := by
 calc a + d = e + d := by sorry
