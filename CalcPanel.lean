@@ -80,7 +80,6 @@ def mkCalcStr (pos : Array Lean.SubExpr.GoalsLocation) (goalType : Expr) (isFirs
     MetaM (String × String) := do
   let subexprPos := pos.map (·.loc.target!)
   let goalType := goalType.consumeMData
-  let goal ← Meta.ppExpr goalType
   let some (rel, lhs, rhs) ← Lean.Elab.Term.getCalcRelation? goalType |
       throwError "invalid 'calc' step, relation expected{indentExpr goalType}"
   let relStr := rel.getAppFn.relStr
@@ -153,29 +152,31 @@ open Std CodeAction
 open Lean Server RequestM
 
 @[tactic_code_action calcTactic]
-def createCalc : TacticCodeAction := fun params _snap _ctx _stack node => do
+def createCalc : TacticCodeAction := fun params _snap ctx _stack node => do
   let .node (.ofTacticInfo info) _ := node | return #[]
-
+  if info.goalsBefore.isEmpty then return #[]
   let eager := {
     title := s!"Generate a calc block."
     kind? := "quickfix"
   }
   let doc ← readDoc
-  pure #[{
+  return #[{
     eager
     lazy? := some do
+      let tacPos := doc.meta.text.utf8PosToLspPos info.stx.getPos?.get!
       let endPos := doc.meta.text.utf8PosToLspPos info.stx.getTailPos?.get!
-      pure { eager with
+      let goal := info.goalsBefore[0]!
+      let goalFmt ← ctx.runMetaM {} <| goal.withContext do Meta.ppExpr (← goal.getType)
+      return { eager with
         edit? := some <|.ofTextEdit params.textDocument.uri
-          { range := ⟨endPos, endPos⟩, newText := "calcYO" }
+          { range := ⟨tacPos, endPos⟩, newText := s!"calc {goalFmt} := by sorry" }
       }
   }]
 end code_action
 
 namespace Lean.Elab.Term
 open Meta
-#check getCalcFirstStep
-#check calcSteps
+
 def getCalcFirstStep' (step0 : TSyntax ``calcFirstStep) : TermElabM (TSyntax ``calcStep) :=
   withRef step0 do
   match step0  with
@@ -256,7 +257,7 @@ elab_rules : tactic
 
 
 example {a b : Nat} (h1 : a - 3 = 2 * b) : a ^ 2 - a + 3 = 4 * b ^ 2 + 10 * b + 9 := by
-  sorry
+sorry
 
 
 example (a b c d e : Nat) (h₁ : a = b) (h₂ : b = c) (h₃ : c = d) (h₄ : d = e): a + d = e + d := by
