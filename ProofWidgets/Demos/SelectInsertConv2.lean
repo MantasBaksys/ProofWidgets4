@@ -144,6 +144,5 @@ elab stx:"conv?" : tactic => do
   savePanelWidgetInfo stx ``ConvSelectionPanel $ pure $ json% { replaceRange: $(replaceRange) }
 
 example (a : Nat) : a + a - a + a = a := by
-  conv?
   -- Put your cursor on the next line
   all_goals { sorry }

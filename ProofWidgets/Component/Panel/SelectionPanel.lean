@@ -1,6 +1,5 @@
 import Lean.Meta.ExprLens
-import ProofWidgets.Component.Panel.Basic
-import ProofWidgets.Presentation.Expr -- Needed for RPC calls in SelectionPanel
+import ProofWidgets.Component.Panel.Basic-- Needed for RPC calls in SelectionPanel
 
 open ProofWidgets in
 /-- Save the expression corresponding to a goals location. -/
